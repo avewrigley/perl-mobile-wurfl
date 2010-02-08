@@ -8,13 +8,10 @@
 
 use strict;
 use warnings;
-use lib 'lib';
 use Mobile::Wurfl;
 
 my $wurfl = Mobile::Wurfl->new( verbose => 1 );
-$wurfl->rebuild_tables();
-# $wurfl->create_tables();
-# $wurfl->update();
+$wurfl->update();
 
 #------------------------------------------------------------------------------
 #
