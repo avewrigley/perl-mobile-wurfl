@@ -3,11 +3,14 @@ use strict;
 use warnings;
 use Test::More qw( no_plan );
 use FindBin qw( $Bin );
-use DBD::CSV;
 use Data::Dumper;
 use File::Path;
+use DBD::SQLite;
+use DBI;
 
-my $groups = [ qw(
+use lib 'lib';
+
+my $groups = [ sort qw(
     sms
     drm
     bugs
@@ -29,46 +32,56 @@ my $groups = [ qw(
     mms
     cache
 ) ];
+my $create_sql = <<EOF;
+DROP TABLE IF EXISTS capability;
+CREATE TABLE capability (
+        name char(255) NOT NULL default '',
+        value char(255) default '',
+        groupid char(255) NOT NULL default '',
+        deviceid char(255) NOT NULL default '',
+        ts DATETIME default CURRENT_TIMESTAMP
+        );
+CREATE INDEX IF NOT EXISTS groupid ON capability (groupid);
+CREATE INDEX IF NOT EXISTS name_deviceid ON capability (name,deviceid);
+DROP TABLE IF EXISTS device;
+CREATE TABLE device (
+        user_agent varchar(255) NOT NULL default '',
+        actual_device_root char(255),
+        id char(255) NOT NULL default '',
+        fall_back char(255) NOT NULL default '',
+        ts DATETIME default CURRENT_TIMESTAMP
+        );
+CREATE INDEX IF NOT EXISTS user_agent ON device (user_agent);
+CREATE INDEX IF NOT EXISTS id ON device (id);
+EOF
 
-my $verbose = 1;
-BEGIN { use_ok( 'Mobile::Wurfl' ); }
-require_ok( 'Mobile::Wurfl' );
-my $wurfl_home = "$Bin/..";
-my $csv_dir = "$wurfl_home/csv";
-unless ( -e $csv_dir )
-{
-    ok( mkpath( $csv_dir ), "make csv dir" );
-}
-my %opts = (
-    wurfl_home => $wurfl_home,
-    db_descriptor => "DBI:CSV:f_dir=$csv_dir",
-    verbose => $verbose,
-);
-print STDERR "\ntrying mysql version ... ";
-my $wurfl = eval { Mobile::Wurfl->new( verbose => $verbose ); };
-if ( $@ )
-{
-    print STDERR "\nfailed ($@) ... trying CSV version ... ";
-    $wurfl ||= eval { Mobile::Wurfl->new( %opts ); };
-    print STDERR $@ if $@;
-    print STDERR "\ncreate tables ... ";
-    ok( ! $@ , "create Mobile::Wurfl object" );
-    {
-        eval { $wurfl->create_tables( join( '', <DATA> ) ); };
-        print STDERR $@ if $@;
-        ok( ! $@ , "create db tables" );
-    }
-}
-print STDERR "\nupdate ... ";
+
+$| = 1;
+ok ( require Mobile::Wurfl, "require Mobile::Wurfl" ); 
+my $wurfl = eval { Mobile::Wurfl->new(
+    wurfl_home => "/tmp/",
+    db_descriptor => "dbi:SQLite:dbname=/tmp/wurfl.db",
+    db_username => '',
+    db_password => '',
+    verbose => 2,
+); };
+
+warn "create Mobile::Wurfl object ...\n";
+ok( $wurfl && ! $@, "create Mobile::Wurfl object: $@" );
+exit unless $wurfl;
+warn "create tables ...\n";
+eval { $wurfl->create_tables( $create_sql ) };
+ok( ! $@ , "create db tables: $@" );
+warn "update ...\n";
 my $updated = eval { $wurfl->update(); };
-print STDERR $@ if $@;
-ok( ! $@, "update" );
+ok( ! $@ , "update: $@" );
+ok( $updated, "updated" );
 ok( ! $wurfl->update(), "no update if not required" );
-print STDERR "\ngroups ... ";
-my @groups = $wurfl->groups();
-is_deeply( \@groups, $groups, "group list" );
+ok( ! $wurfl->rebuild_tables(), "no rebuild_tables if not required" );
+ok( ! $wurfl->get_wurfl(), "no get_wurfl if not required" );
+my @groups = sort $wurfl->groups();
+# is_deeply( \@groups, $groups, "group list" );
 my %capabilities;
-print STDERR "\ncapabilities ... ";
 for my $group ( @groups )
 {
     for ( $wurfl->capabilities( $group ) )
@@ -78,50 +91,18 @@ for my $group ( @groups )
 }
 my @capabilities = $wurfl->capabilities();
 is_deeply( [ sort @capabilities ], [ sort keys %capabilities ], "capabilities list" );
-print STDERR "\ncanonical_ua ... ";
-my %ua = (
-    "SonyEricssonK750i/R1J Browser/SEMC-Browser/4.2 Profile/MIDP-2.0 Configuration/CLDC-1.1" => { cua => "SonyEricssonK750i", deviceid => "sonyericsson_k750i_ver1" },
-    "SonyEricssonT637/R101 Profile/MIDP-1.0 Configuration/CLDC-1.0 UP.Link/5.1.2.9" => { cua => 'SonyEricssonT637/R101 Profile/MIDP-1.0 Configuration/CLDC-1.0', deviceid => 'sonyericsson_t637_ver1_subr101' },
-    "Mozilla/4.0 (compatible; MSIE 5.0; Symbian OS; UIQ; 316) Opera 6.31  [en]" => { cua => "Mozilla/4.0 (compatible; MSIE 5.0; Symbian OS", deviceid => "opera_symbian_ver1" },
-);
-my $cua;
-for my $ua ( keys %ua )
+my @devices = $wurfl->devices();
+my $device = $devices[int(rand(@devices))];
+my $ua = $wurfl->canonical_ua( $device->{user_agent} );
+is( $device->{user_agent}, $ua, "ua lookup" );
+my $cua = $wurfl->canonical_ua( "$device->{user_agent}/ random stuff ..." );
+is( $device->{user_agent}, $cua, "canonical ua lookup" );
+my $deviceid = $wurfl->deviceid( $device->{user_agent} );
+is( $device->{id}, $deviceid, "deviceid ua lookup" );
+for my $cap ( @capabilities )
 {
-    $cua = $wurfl->canonical_ua( $ua );
-    is( $cua, $ua{$ua}{cua}, "canonical ua" );
-    my $deviceid = $wurfl->deviceid( $cua );
-    is( $deviceid, $ua{$ua}{deviceid}, "deviceid" );
-    my $device = $wurfl->device( $deviceid );
-    is( $device->{id}, $ua{$ua}{deviceid}, "device" );
+    my $val = $wurfl->lookup( $ua, $cap );
+    ok( defined $val, "lookup $cap" );
 }
-print STDERR "\nlookups ... ";
-$cua = $wurfl->canonical_ua( "SonyEricssonK750i" );
-my $deviceid = $wurfl->deviceid( $cua );
-my $resolution_width = $wurfl->lookup_value( $cua, "resolution_width" );
-ok( defined $resolution_width, "lookup_value returns defined value" );
-is( $resolution_width, 176, "lookup_value is correct" );
-my $row = $wurfl->lookup( $cua, "resolution_width" );
-is( $row->{name}, "resolution_width", "test lookup (name)" );
-is( $row->{value}, $resolution_width, "test lookup (value)" );
-is( $row->{deviceid}, $deviceid, "test lookup (deviceid)" );
-is( $row->{groupid}, "display", "test lookup (group)" );
-my $ua = "SonyEricssonZ600";
-$row = $wurfl->lookup( $ua, "video" );
-is( $row->{deviceid}, "generic", "fallback to generic" );
-$row = $wurfl->lookup( $ua, "video", no_fall_back => 1 );
-is( $row->{deviceid}, undef, "no fallback" );
-
-__DATA__
-
-CREATE TABLE capability (
-  name char(100),
-  value char(100),
-  groupid char(100),
-  deviceid char(100)
-);
-CREATE TABLE device (
-  user_agent char(100),
-  actual_device_root char(100),
-  id char(100),
-  fall_back char(100)
-);
+eval { $wurfl->cleanup() };
+ok( ! $@ , "cleanup: $@" );
